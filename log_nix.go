@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"time"
+	"os"
+	"sync"
 )
 
 type color int
@@ -106,4 +109,61 @@ func doFmtVerbLevelColor(layout string, level Level, output io.Writer) {
 	} else {
 		output.Write([]byte(colors[level]))
 	}
+}
+
+//自己搞的对象，日志文件
+type WxLogBackend struct {
+	Logger      *log.Logger
+	Color       bool
+	ColorConfig []string
+	fileFd      *os.File
+	fileName    string
+	fileDate    string
+	mu          sync.Mutex
+}
+
+func NewWxLogBackend(out *os.File, prefix string, flag int, filename string, filedate string) *WxLogBackend {
+	return &WxLogBackend{
+		Logger: log.New(out, prefix, flag),
+		fileFd: out,
+		fileName: filename,
+		fileDate: filedate,
+	}
+}
+
+func (b *WxLogBackend) Log(level Level, calldepth int, rec *Record) error {
+	//文件日期修改，需要重新初始化日志文件
+	tempFileDate := time.Now().Local().Format("2006-01-02")
+	if tempFileDate != b.fileDate {
+		//获取锁
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if tempFileDate != b.fileDate {
+			newFileName := b.fileName + "." + tempFileDate
+			f, err := os.OpenFile(newFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+			if err == nil {
+				b.Logger = log.New(f, "", 0)
+				b.fileFd.Close()
+				b.fileDate = tempFileDate
+				b.fileFd = f
+			}
+		}
+	}
+	
+	if b.Color {
+		col := colors[level]
+		if len(b.ColorConfig) > int(level) && b.ColorConfig[level] != "" {
+			col = b.ColorConfig[level]
+		}
+		
+		buf := &bytes.Buffer{}
+		buf.Write([]byte(col))
+		buf.Write([]byte(rec.Formatted(calldepth + 1)))
+		buf.Write([]byte("\033[0m"))
+		// For some reason, the Go logger arbitrarily decided "2" was the correct
+		// call depth...
+		return b.Logger.Output(calldepth+2, buf.String())
+	}
+	
+	return b.Logger.Output(calldepth+2, rec.Formatted(calldepth+1))
 }
